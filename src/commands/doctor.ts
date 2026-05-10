@@ -3,7 +3,7 @@ import * as db from '../core/db.ts';
 import { LATEST_VERSION, getIdleBlockers } from '../core/migrate.ts';
 import { checkResolvable } from '../core/check-resolvable.ts';
 import { autoFixDryViolations, type AutoFixReport, type FixOutcome } from '../core/dry-fix.ts';
-import { autoDetectSkillsDir } from '../core/repo-root.ts';
+import { autoDetectSkillsDirReadOnly } from '../core/repo-root.ts';
 import { loadCompletedMigrations } from '../core/preferences.ts';
 import { compareVersions } from './migrations/index.ts';
 import { createProgress, startHeartbeat, type ProgressReporter } from '../core/progress.ts';
@@ -295,16 +295,35 @@ export async function runDoctor(engine: BrainEngine | null, args: string[], dbSo
   // Use the same auto-detect as `check-resolvable` so doctor sees a
   // workspace/skills dir reachable via $OPENCLAW_WORKSPACE or
   // ~/.openclaw/workspace, not just a `skills/` walked up from cwd.
-  const detected = autoDetectSkillsDir();
+  // Read-only variant adds the install-path fallback so a hosted-CLI install
+  // run from `~` (e.g., `bun install -g github:garrytan/gbrain && cd ~ &&
+  // gbrain doctor`) can still find the bundled skills/ dir without warning.
+  const detected = autoDetectSkillsDirReadOnly();
   const skillsDir = detected.dir;
   if (skillsDir) {
 
     // --fix: run auto-repair BEFORE checkResolvable so the post-fix scan
     // reflects the new state. Auto-fix only targets DRY violations today;
     // other resolver issues are left to human repair.
+    //
+    // SAFETY GATE (v0.31.7 follow-up to D5): refuse --fix when the skills
+    // dir came from the install-path fallback. autoFixDryViolations writes
+    // to SKILL.md files; a user running `cd ~ && gbrain doctor --fix`
+    // without an explicit signal would have install_path resolve to the
+    // bundled gbrain repo and silently rewrite the install-tree skills.
+    // Codex caught this leak in the v0.31.7 ship review (D6 lock).
     if (doFix) {
-      autoFixReport = autoFixDryViolations(skillsDir, { dryRun });
-      printAutoFixReport(autoFixReport, dryRun, jsonOutput);
+      if (detected.source === 'install_path') {
+        process.stderr.write(
+          'gbrain doctor --fix refused: skills dir resolved via install-path fallback (read-only).\n' +
+          'The --fix flag writes to SKILL.md files; running it against the bundled install\n' +
+          'tree would silently mutate gbrain itself. Set $GBRAIN_SKILLS_DIR, $OPENCLAW_WORKSPACE,\n' +
+          'or pass --skills-dir <path> to point at the workspace you actually want to fix.\n',
+        );
+      } else {
+        autoFixReport = autoFixDryViolations(skillsDir, { dryRun });
+        printAutoFixReport(autoFixReport, dryRun, jsonOutput);
+      }
     }
 
     const report = checkResolvable(skillsDir);
@@ -930,18 +949,35 @@ export async function runDoctor(engine: BrainEngine | null, args: string[], dbSo
 
   // 9. Graph health (link + timeline coverage on entity pages).
   // dead_links removed in v0.10.1: ON DELETE CASCADE on link FKs makes it always 0.
+  //
+  // Skip when the brain has 0 entity pages (markdown-only wikis, journals,
+  // notes brains). The coverage formula divides by entity-page count, so it's
+  // structurally undefined when no entities exist — emitting WARN under that
+  // condition is a false positive. Closes #530.
   progress.heartbeat('graph_coverage');
   try {
     const health = await engine.getHealth();
+    const entityCount = (await engine.executeRaw<{ count: number }>(
+      "SELECT COUNT(*)::int AS count FROM pages WHERE type IN ('entity', 'person', 'company', 'organization')",
+    ))[0]?.count ?? 0;
+
     const linkPct = ((health.link_coverage ?? 0) * 100).toFixed(0);
     const timelinePct = ((health.timeline_coverage ?? 0) * 100).toFixed(0);
-    if ((health.link_coverage ?? 0) >= 0.5 && (health.timeline_coverage ?? 0) >= 0.5) {
+    if (entityCount === 0) {
+      // Markdown-only / journal / wiki brain — no entity pages to compute
+      // coverage against. Coverage formula is structurally inapplicable.
+      checks.push({
+        name: 'graph_coverage',
+        status: 'ok',
+        message: 'No entity pages — graph_coverage not applicable (markdown-only brain)',
+      });
+    } else if ((health.link_coverage ?? 0) >= 0.5 && (health.timeline_coverage ?? 0) >= 0.5) {
       checks.push({ name: 'graph_coverage', status: 'ok', message: `Entity link coverage ${linkPct}%, timeline ${timelinePct}%` });
     } else {
       checks.push({
         name: 'graph_coverage',
         status: 'warn',
-        message: `Entity link coverage ${linkPct}%, timeline ${timelinePct}%. Run: gbrain extract links && gbrain extract timeline`,
+        message: `Entity link coverage ${linkPct}%, timeline ${timelinePct}% (${entityCount} entity pages). Run: gbrain extract all`,
       });
     }
 
