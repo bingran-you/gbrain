@@ -498,6 +498,20 @@ export interface BrainEngine {
    */
   getAllSlugs(opts?: { sourceId?: string }): Promise<Set<string>>;
 
+  /**
+   * v0.32.8: cross-source page enumeration. Returns one row per (slug,
+   * source_id) pair across the brain, ordered by (source_id, slug) for
+   * deterministic iteration on large brains. Used by extract-takes,
+   * extract, and integrity to replace the `getAllSlugs() → getPage(slug)`
+   * N+1 pattern, which silently defaulted to source_id='default' and
+   * skipped non-default-source pages.
+   *
+   * Cheap by design: only slug + source_id, not the full Page row. For
+   * loops that need page.compiled_truth / timeline / frontmatter, use
+   * `forEachPage` from src/core/engine-iter.ts instead.
+   */
+  listAllPageRefs(): Promise<Array<{ slug: string; source_id: string }>>;
+
   // Search
   searchKeyword(query: string, opts?: SearchOpts): Promise<SearchResult[]>;
   searchVector(embedding: Float32Array, opts?: SearchOpts): Promise<SearchResult[]>;
@@ -1129,7 +1143,7 @@ export interface BrainEngine {
 
   // Migration support
   runMigration(version: number, sql: string): Promise<void>;
-  getChunksWithEmbeddings(slug: string): Promise<Chunk[]>;
+  getChunksWithEmbeddings(slug: string, opts?: { sourceId?: string }): Promise<Chunk[]>;
 
   // Raw SQL (for Minions job queue and other internal modules)
   executeRaw<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]>;

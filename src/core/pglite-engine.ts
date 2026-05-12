@@ -503,7 +503,7 @@ export class PGLiteEngine implements BrainEngine {
       where.push('deleted_at IS NULL');
     }
     const { rows } = await this.db.query(
-      `SELECT id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, deleted_at
+      `SELECT id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, deleted_at
        FROM pages WHERE ${where.join(' AND ')} LIMIT 1`,
       params
     );
@@ -551,7 +551,7 @@ export class PGLiteEngine implements BrainEngine {
          import_filename       = COALESCE(EXCLUDED.import_filename,       pages.import_filename),
          chunker_version       = COALESCE(EXCLUDED.chunker_version,       pages.chunker_version),
          source_path           = COALESCE(EXCLUDED.source_path,           pages.source_path)
-       RETURNING id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, effective_date, effective_date_source, import_filename`,
+       RETURNING id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, effective_date, effective_date_source, import_filename`,
       [sourceId, slug, page.type, pageKind, page.title, page.compiled_truth, page.timeline || '', JSON.stringify(frontmatter), hash, effectiveDate, effectiveDateSource, importFilename, chunkerVersion, sourcePath]
     );
     return rowToPage(rows[0] as Record<string, unknown>);
@@ -640,6 +640,11 @@ export class PGLiteEngine implements BrainEngine {
       params.push(escaped);
       where.push(`p.slug LIKE $${params.length} ESCAPE '\\'`);
     }
+    // v0.31.12: scope to a single source when requested.
+    if (filters?.sourceId) {
+      params.push(filters.sourceId);
+      where.push(`p.source_id = $${params.length}`);
+    }
     // v0.26.5: hide soft-deleted by default; opt in via filters.includeDeleted.
     if (filters?.includeDeleted !== true) {
       where.push('p.deleted_at IS NULL');
@@ -677,6 +682,18 @@ export class PGLiteEngine implements BrainEngine {
     }
     const { rows } = await this.db.query('SELECT slug FROM pages');
     return new Set((rows as { slug: string }[]).map(r => r.slug));
+  }
+
+  async listAllPageRefs(): Promise<Array<{ slug: string; source_id: string }>> {
+    // v0.32.8: see postgres-engine.ts:listAllPageRefs for context. ORDER BY
+    // (source_id, slug) for determinism; WHERE deleted_at IS NULL matches
+    // default page visibility.
+    const { rows } = await this.db.query(
+      `SELECT slug, source_id FROM pages
+       WHERE deleted_at IS NULL
+       ORDER BY source_id, slug`
+    );
+    return (rows as { slug: string; source_id: string }[]).map(r => ({ slug: r.slug, source_id: r.source_id }));
   }
 
   async resolveSlugs(partial: string): Promise<string[]> {
@@ -1253,7 +1270,7 @@ export class PGLiteEngine implements BrainEngine {
   async listStaleChunks(): Promise<StaleChunkRow[]> {
     const { rows } = await this.db.query(
       `SELECT p.slug, cc.chunk_index, cc.chunk_text, cc.chunk_source,
-              cc.model, cc.token_count
+              cc.model, cc.token_count, p.source_id
          FROM content_chunks cc
          JOIN pages p ON p.id = cc.page_id
         WHERE cc.embedding IS NULL
@@ -3118,14 +3135,23 @@ export class PGLiteEngine implements BrainEngine {
     await this.db.exec(sql);
   }
 
-  async getChunksWithEmbeddings(slug: string): Promise<Chunk[]> {
-    const { rows } = await this.db.query(
-      `SELECT cc.* FROM content_chunks cc
-       JOIN pages p ON p.id = cc.page_id
-       WHERE p.slug = $1
-       ORDER BY cc.chunk_index`,
-      [slug]
-    );
+  async getChunksWithEmbeddings(slug: string, opts?: { sourceId?: string }): Promise<Chunk[]> {
+    const sourceId = opts?.sourceId;
+    const { rows } = sourceId
+      ? await this.db.query(
+          `SELECT cc.* FROM content_chunks cc
+           JOIN pages p ON p.id = cc.page_id
+           WHERE p.slug = $1 AND p.source_id = $2
+           ORDER BY cc.chunk_index`,
+          [slug, sourceId]
+        )
+      : await this.db.query(
+          `SELECT cc.* FROM content_chunks cc
+           JOIN pages p ON p.id = cc.page_id
+           WHERE p.slug = $1
+           ORDER BY cc.chunk_index`,
+          [slug]
+        );
     return (rows as Record<string, unknown>[]).map(r => rowToChunk(r, true));
   }
 

@@ -559,7 +559,7 @@ export class PostgresEngine implements BrainEngine {
     const sourceCondition = sourceId ? sql`AND source_id = ${sourceId}` : sql``;
     const deletedCondition = includeDeleted ? sql`` : sql`AND deleted_at IS NULL`;
     const rows = await sql`
-      SELECT id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, deleted_at
+      SELECT id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, deleted_at
       FROM pages
       WHERE slug = ${slug} ${sourceCondition} ${deletedCondition}
       LIMIT 1
@@ -611,7 +611,7 @@ export class PostgresEngine implements BrainEngine {
         import_filename       = COALESCE(EXCLUDED.import_filename,       pages.import_filename),
         chunker_version       = COALESCE(EXCLUDED.chunker_version,       pages.chunker_version),
         source_path           = COALESCE(EXCLUDED.source_path,           pages.source_path)
-      RETURNING id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, effective_date, effective_date_source, import_filename
+      RETURNING id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, effective_date, effective_date_source, import_filename
     `;
     return rowToPage(rows[0]);
   }
@@ -685,6 +685,10 @@ export class PostgresEngine implements BrainEngine {
     const slugCondition = slugPrefix
       ? sql`AND p.slug LIKE ${slugPrefix.replace(/[\\%_]/g, (c) => '\\' + c) + '%'} ESCAPE '\\'`
       : sql``;
+    // v0.31.12: scope to a single source when requested.
+    const sourceCondition = filters?.sourceId
+      ? sql`AND p.source_id = ${filters.sourceId}`
+      : sql``;
     // v0.26.5: hide soft-deleted by default; opt in via filters.includeDeleted.
     const deletedCondition = filters?.includeDeleted === true
       ? sql``
@@ -698,7 +702,7 @@ export class PostgresEngine implements BrainEngine {
     const rows = await sql`
       SELECT p.* FROM pages p
       ${tagJoin}
-      WHERE 1=1 ${typeCondition} ${tagCondition} ${updatedCondition} ${slugCondition} ${deletedCondition}
+      WHERE 1=1 ${typeCondition} ${tagCondition} ${updatedCondition} ${slugCondition} ${sourceCondition} ${deletedCondition}
       ORDER BY ${orderBy} LIMIT ${limit} OFFSET ${offset}
     `;
 
@@ -714,6 +718,20 @@ export class PostgresEngine implements BrainEngine {
     }
     const rows = await sql`SELECT slug FROM pages`;
     return new Set(rows.map((r) => r.slug as string));
+  }
+
+  async listAllPageRefs(): Promise<Array<{ slug: string; source_id: string }>> {
+    // v0.32.8: cross-source page enumeration. ORDER BY (source_id, slug) for
+    // deterministic iteration (F11) — same-slug-different-source pages stay
+    // grouped predictably. WHERE deleted_at IS NULL matches default getPage
+    // visibility semantics (v0.26.5).
+    const sql = this.sql;
+    const rows = await sql`
+      SELECT slug, source_id FROM pages
+      WHERE deleted_at IS NULL
+      ORDER BY source_id, slug
+    `;
+    return rows.map((r) => ({ slug: r.slug as string, source_id: r.source_id as string }));
   }
 
   async resolveSlugs(partial: string): Promise<string[]> {
@@ -1233,7 +1251,7 @@ export class PostgresEngine implements BrainEngine {
     const sql = this.sql;
     const rows = await sql`
       SELECT p.slug, cc.chunk_index, cc.chunk_text, cc.chunk_source,
-             cc.model, cc.token_count
+             cc.model, cc.token_count, p.source_id
       FROM content_chunks cc
       JOIN pages p ON p.id = cc.page_id
       WHERE cc.embedding IS NULL
@@ -3101,14 +3119,22 @@ export class PostgresEngine implements BrainEngine {
     await conn.unsafe(sqlStr);
   }
 
-  async getChunksWithEmbeddings(slug: string): Promise<Chunk[]> {
+  async getChunksWithEmbeddings(slug: string, opts?: { sourceId?: string }): Promise<Chunk[]> {
     const conn = this.sql;
-    const rows = await conn`
-      SELECT cc.* FROM content_chunks cc
-      JOIN pages p ON p.id = cc.page_id
-      WHERE p.slug = ${slug}
-      ORDER BY cc.chunk_index
-    `;
+    const sourceId = opts?.sourceId;
+    const rows = sourceId
+      ? await conn`
+          SELECT cc.* FROM content_chunks cc
+          JOIN pages p ON p.id = cc.page_id
+          WHERE p.slug = ${slug} AND p.source_id = ${sourceId}
+          ORDER BY cc.chunk_index
+        `
+      : await conn`
+          SELECT cc.* FROM content_chunks cc
+          JOIN pages p ON p.id = cc.page_id
+          WHERE p.slug = ${slug}
+          ORDER BY cc.chunk_index
+        `;
     return rows.map((r) => rowToChunk(r as Record<string, unknown>, true));
   }
 
