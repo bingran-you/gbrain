@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [0.60.145.0] - 2026-10-10
+## [0.60.146.0] - 2026-10-10
 
 **On PGLite at 50,000 pages, the vector index now builds (11 minutes, where it used to run out of memory) and vector search drops from 1.7 s to 27 ms. A 50,000-page import no longer leaves about 30,000 Git effects queued, so `gbrain serve`'s first call is 177 ms instead of 641 ms. The first sync of an already-imported 3,700-file source takes 22 s instead of 96 s on Postgres and 28 s instead of 60 s on PGLite.**
 
@@ -38,6 +38,25 @@ On a Postgres 5k import, neither side leaves a backlog: 145/146 s on base, 160/1
 - **Git effects without the durability hook finish as a group** (`persistence/effects.ts`). In a folder without the hook, a single-file Git effect runs no git command and only records `durability_not_enabled`, but each one still took its own worktree lock, guard transaction and update. A coalesced group of up to 100 now takes each root's lock once, guards each source incarnation once, validates every path as before (escape, replaced file, db_only, read-only mirror) and records the plain outcomes in one update bound to each effect's claim token. A failed guard or path fails only the effects it covers.
 - **PGLite vector index builds fit** (`pglite-embedded-assets.ts`, `vector-index.ts` `withHnswBuildMemory`, `embedding-ann-build.ts`, `commands/reindex-vectors.ts`). pglite.wasm caps its heap at 2 GiB. PGLite runs no workers, but its default `max_parallel_maintenance_workers=2` still made pgvector reserve all of `maintenance_work_mem` up front. The build also WAL-logs the whole index (1.9 GB) in one statement, past the automatic checkpoint trigger (539 MB), and that checkpoint wedged inside the statement. PGLite now starts with `max_parallel_maintenance_workers=0` and `max_wal_size=8GB`; the between-statement guard still checkpoints at 256 MB. The deferred ANN build and `reindex --vectors` size `maintenance_work_mem` to the graph (rows × (vector + 640 B) × 1.1, floor 64 MB). Above a 1.5 GiB graph (about 308k 1024-dim chunks), they refuse before building with `pglite_vector_index_too_large`, a read-only `gbrain migrate --to postgres --plan --json` fix and a doctor verify. Postgres is unchanged.
 - Tests: `sync-waiver-run-imports.test.ts` covers twelve unchanged files waived in under 8 transactions (28 on base), an edit during the run, an owner change during the screens, and a crash with resume, on both engines. Two new cases in `persistence-git-coalescing-5530.slow.test.ts` and its Postgres twin: a 33-effect group writes one outcome update and at most 6 transactions (33 and 37 on base), and a mixed group (unsafe path, hand-edited file, replaced source incarnation) keeps every effect's own outcome, identical to base. `pglite-hnsw-build.test.ts` covers the start settings (2 and 1024 on base), the graph estimate, a real sized build that restores the setting, the refusal envelope with no build, and Postgres pass-through. The crash robot ran 600 s on each engine with every seam, PgBouncer and `pooler_disconnect` on Postgres, with 0 violations.
+
+## [0.60.145.0] - 2026-10-10
+**Bulk DB extraction no longer sees purged facts. `gbrain extract --source db` and the batched derived-link write read snapshots with `readPageSnapshotsBatch`, which never read `fact_purges`. A fence row purged for the page, or purged source-wide with a `'*'` tombstone, stayed in the batched body that links and timeline were extracted from, although `get_page` and every per-page read hid it. The batch now applies the same purges and `'*'` purge marker as `readPageSnapshot`, and under `GBRAIN_RLS_SCOPE_BINDING=1` it runs scoped to the batch's sources.**
+
+Efficiency follow-up (GBRA-67, from GBRA-69's report). Measured on the same 4-vCPU AMD EPYC / 16 GiB machine, Postgres 16 + pgvector 0.8.7, synthetic brains (5k = 5,001 pages, 50k = 50,010 pages), warm, 3 rounds x N=40 (get_page) or 2 rounds x N=25 (batches).
+
+| Path | Engine, brain | Before | After |
+|---|---|---|---|
+| get_page snapshot statement, mean | Postgres 5k | 0.52-0.67 ms (unguarded fingerprints) | 0.19-0.30 ms |
+| get_page snapshot statement, mean | Postgres 50k | 0.62-0.69 ms (unguarded fingerprints) | 0.15-0.20 ms |
+| get_page MCP call, p50 | Postgres 5k / 50k | 8.7-11.8 / 7.9-9.0 ms | 10.0-17.4 / 7.1-8.7 ms (within run-to-run noise) |
+| `readPageSnapshotsBatch`, 100 refs, p50 | Postgres 5k / 50k | 7.9-8.3 / 8.7 ms | 9.3-9.4 / 9.5-9.6 ms |
+
+The get_page rows measure the fingerprint guard that shipped in v0.60.141.0 (GBRA-75 wave 7), against master with only that guard reverted; this release does not change `snapshot.ts`. The statement saves 0.4-0.5 ms per read, which is smaller than the MCP call's run-to-run noise on synthetic bodies. The batch costs about 1 ms more per 100 pages for the two purge lookups it was missing.
+
+### Itemized changes
+
+- **Purge-correct batched snapshots** (`src/core/page-snapshot-batch.ts`). The batch statement now reads page-subject `fact_purges` rows and the source's `'*'` purge marker, resolves `'*'` tombstones per overlaid fence through `resolveGlobalPurges`, and computes line fingerprints under the same guard as `snapshot.ts`. `test/page-snapshot-batch.test.ts` and its Postgres arm pin batch == per-page read with both purge kinds; on master the batch returned the purged rows and no purge withdrawals.
+- **RLS-scoped batch read** (`engine.readPageSnapshotsBatch`). The batched read is now an engine member. Postgres runs it through `withScopedReadTransaction` with the refs' sources, so `replaceDerivedLinksBatch`, `extract --source db` and the timeline DB walk bind `app.scopes` under `GBRAIN_RLS_SCOPE_BINDING=1`. With the flag off it stays on the caller's lane (no new pool hold). The RLS inventory golden records `replaceDerivedLinksBatch` as scoped and 24 scoped call sites.
 
 ## [0.60.144.0] - 2026-10-10
 
