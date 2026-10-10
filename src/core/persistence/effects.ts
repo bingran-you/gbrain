@@ -651,7 +651,7 @@ export async function runPersistenceEffects(engine: BrainEngine, config: GBrainC
         outcome=$2::text::jsonb,updated_at=now()
         FROM jsonb_to_recordset($1::text::jsonb) AS t(id bigint,token uuid)
         WHERE e.id=t.id AND e.execution_token=t.token AND e.recovery IS NULL AND ${PERSISTENCE_PROTOCOL_PREDICATE}`,
-      [JSON.stringify(recorded.map(effect => ({ id: effect.id, token: effect.execution_token }))), JSON.stringify(DURABILITY_NOT_ENABLED)]);
+      [JSON.stringify(recorded.map(effect => ({ id: String(effect.id), token: effect.execution_token }))), JSON.stringify(DURABILITY_NOT_ENABLED)]);
     } catch (error) { for (const effect of recorded) await recordFailure(engine, effect, error, opts.signal); }
   };
   // A deferred effect that requeues itself (a page walk advancing its cursor,
