@@ -16,7 +16,6 @@
 
 import type { BrainEngine } from './engine.ts';
 import { opError } from './ops/contract.ts';
-import { quoteIdentifier } from './search/embedding-column.ts';
 
 export const PGVECTOR_HNSW_VECTOR_MAX_DIMS = 2000;
 export const PGVECTOR_HNSW_HALFVEC_MAX_DIMS = 4000;
@@ -73,6 +72,8 @@ export function applyChunkEmbeddingIndexPolicy(sql: string, dims: number): strin
  * 1024-dim chunks: 4,669 B per element (565 B beyond the stored vector),
  * a 1,300 MB build peaked the heap at 1,320 MB, the index was 1.9 GB.
  */
+// Not search/embedding-column.ts's quoteIdentifier: this module is a schema-snapshot input, and that one is not.
+const quoted = (name: string) => `"${name.replace(/"/g, '""')}"`;
 export const PGLITE_HNSW_GRAPH_BUDGET_BYTES = 1536 * 1024 * 1024;
 const HNSW_ELEMENT_OVERHEAD_BYTES = 640;
 const PGLITE_DEFAULT_MAINTENANCE_WORK_MEM_MB = 64;
@@ -93,7 +94,7 @@ export async function withHnswBuildMemory<T>(
 ): Promise<T> {
   if (engine.kind !== 'pglite') return build();
   const [shape] = await engine.executeRaw<{ rows: number; type: string; dims: number }>(
-    `SELECT (SELECT count(*) FROM ${quoteIdentifier(table)} WHERE ${quoteIdentifier(column)} IS NOT NULL)::int AS rows,
+    `SELECT (SELECT count(*) FROM ${quoted(table)} WHERE ${quoted(column)} IS NOT NULL)::int AS rows,
             t.typname AS type, a.atttypmod AS dims
        FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid
       WHERE a.attrelid = to_regclass($1) AND a.attname = $2`, [table, column]);
