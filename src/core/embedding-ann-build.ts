@@ -18,7 +18,7 @@
  * again at build time.
  */
 import type { BrainEngine } from './engine.ts';
-import { chunkEmbeddingIndexSql, hnswIndexExpected } from './vector-index.ts';
+import { chunkEmbeddingIndexSql, hnswIndexExpected, withHnswBuildMemory } from './vector-index.ts';
 
 export interface DeferredAnnIndex { name: string; def: string }
 
@@ -115,7 +115,8 @@ export async function buildDeferredAnnIndexes(
         });
       } else {
         if (validity === false) await engine.executeRaw(`DROP INDEX IF EXISTS ${next.name}`);
-        await engine.executeRaw(next.def.replace(/^CREATE INDEX (?:IF NOT EXISTS )?/, 'CREATE INDEX IF NOT EXISTS '));
+        await withHnswBuildMemory(engine, ANN_DEF.exec(next.def)![2]!, 'embedding', () =>
+          engine.executeRaw(next.def.replace(/^CREATE INDEX (?:IF NOT EXISTS )?/, 'CREATE INDEX IF NOT EXISTS ')));
       }
       if (await annIndexValidity(engine, next.name) !== true) {
         throw new Error(`vector index ${next.name} is not valid after its build; rerun the migration to rebuild it`);
