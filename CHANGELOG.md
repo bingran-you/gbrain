@@ -12,9 +12,9 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## [0.60.146.0] - 2026-10-10
 
-**On PGLite at 50,000 pages, the vector index now builds (11 minutes, where it used to run out of memory) and vector search drops from 1.7 s to 27 ms. A 50,000-page import no longer leaves about 30,000 Git effects queued, so `gbrain serve`'s first call is 177 ms instead of 641 ms. The first sync of an already-imported 3,700-file source takes 22 s instead of 96 s on Postgres and 28 s instead of 60 s on PGLite.**
+**On PGLite at 50,000 pages, the vector index now builds (11 minutes, where it used to run out of memory) and vector search drops from 1.7 s to 27 ms. A 50,000-page import no longer leaves about 30,000 Git effects queued, so `gbrain serve`'s first call is 189 ms instead of 640 ms and the first write after it 266 ms instead of 758 ms. The first sync of an already-imported 3,700-file source takes 22 s instead of 96 s on Postgres and 28 s instead of 60 s on PGLite.**
 
-Efficiency wave 8 (GBRA-75). Base is master at wave 7 (97497f68e). Synthetic brains on 4-vCPU AMD EPYC / 16 GiB machines with Bun 1.4.2: 5k = 5,001 pages, 50k = 50,010 pages / 248,802 vector(1024) chunks. Base and branch were interleaved on the same machine and are shown as p50 / p95.
+Efficiency wave 8 (GBRA-75). Base is master at wave 7 (97497f68e); the import, serve and first-write rows compare against master 1a3adfe99 with one fresh import per side and restored copies. Synthetic brains on 4-vCPU AMD EPYC / 16 GiB machines with Bun 1.4.2: 5k = 5,001 pages, 50k = 50,010 pages / 248,802 vector(1024) chunks. Base and branch were interleaved on the same machine and are shown as p50 / p95.
 
 | Path | Engine, brain, N | Before | After |
 |---|---|---|---|
@@ -22,15 +22,16 @@ Efficiency wave 8 (GBRA-75). Base is master at wave 7 (97497f68e). Synthetic bra
 | same | PGLite 5k, N=2 | 60,191 / 62,327 ms | 27,995 / 30,109 ms |
 | statements per skipped file in that sync | Postgres 5k | 172 | 82 |
 | 1-page sync / no-change sync (guards) | Postgres 5k, N=10 | 1,334 / 733 ms | 1,421 / 687 ms |
-| Git effects still open after `gbrain import` of every source | PGLite 50k, N=1 | 29,937 | 2 |
-| `gbrain import` of every source, wall | PGLite 50k, N=1 | 1,442 s | 1,488 s |
-| `gbrain serve` first call on the freshly imported brain, cold | PGLite 50k, N=5 | 641 / 865 ms | 177 / 220 ms |
-| `gbrain serve` start to first answer, same runs | PGLite 50k, N=5 | 1,423 / 1,602 ms | 934 / 972 ms |
+| Git effects still open after `gbrain import` of every source | PGLite 50k, N=1 | 30,070 | 2 |
+| `gbrain import` of every source, wall | PGLite 50k, N=1 | 1,377 s | 1,380 s |
+| `gbrain serve` first call on a copy of the fresh import, cold | PGLite 50k, N=3 | 640 / 642 ms | 189 / 201 ms |
+| `gbrain serve` start to first answer, same runs | PGLite 50k, N=3 | 1,324 / 1,609 ms | 976 / 985 ms |
+| first fact write (`writeSingleFact`) on a copy of the fresh import, then 200 timed | PGLite 50k, N=3 | 758 / 782 ms, then 71 / 98 ms | 266 / 282 ms, then 53 / 75 ms |
 | Git effects finished in 60 s of `gbrain serve` on a backlogged brain | PGLite 50k, N=2 | 37,832 and 41,760 of 50,010 | 50,010 and 50,010 |
 | HNSW build of every vector index (`gbrain reindex --vectors`) | PGLite 50k | out of memory at 1 GB `maintenance_work_mem`; wedged after the index write at 1.5 GB | 663 s, chunk index 1.9 GB |
 | warm `searchVector`, limit 10 / limit 50 | PGLite 50k, N=20 ×2 | 1,716 / 1,768 and 1,713 / 1,761 ms (exact scan) | 27.5 / 32.4 and 52.0 / 58.0 ms |
 
-On a Postgres 5k import, neither side leaves a backlog: 145/146 s on base, 160/149 s on the branch (N=2), with all 5,001 Git effects committed.
+No first write threw `write_pending` on either side on this machine. On a Postgres 5k import, neither side leaves a backlog: 145/146 s on base, 160/149 s on the branch (N=2), with all 5,001 Git effects committed.
 
 ### Itemized changes
 
